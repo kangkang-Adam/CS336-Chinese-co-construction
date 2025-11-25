@@ -2,7 +2,7 @@
 分词器是连接人类自然语言与机器计算的“关键桥梁”，负责将非结构化的文本高效地编码为模型可理解的数字序列（Tokens）。其地位至关重要，它决定了模型的输入形式。我们可以将大语言模型（LLM）视为一位阅读者，分词器则执行了文本的“认知拆解”即将连续的文本流切分为具备最小语义或功能意义的基本单元，类似于人类阅读时对词汇或音节的本能识别。本章节将剖析分词器实现文本“数字化”的核心原理，并探讨BPE等主流分词算法的实际应用。
 
 <p align="center">
-<img width="500" height="300" alt="0e717e4cf0df64875a271123bf962631" src="https://github.com/user-attachments/assets/a53dd727-8682-4314-92dc-3b3e18dfaf58" />
+<img width="600" height="350" alt="0e717e4cf0df64875a271123bf962631" src="https://github.com/user-attachments/assets/a53dd727-8682-4314-92dc-3b3e18dfaf58" />
 </p>
 
 ### 1分词器原理
