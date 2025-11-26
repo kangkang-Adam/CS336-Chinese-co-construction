@@ -672,6 +672,154 @@ $$
 
 除了分词器的选择与训练语料直接影响LLM的输入稀疏度与表示效率。用大规模、高质量且多样的语料训练分词器通常会减少token碎片化即生成更常见、更稳定的子词单元，使得同一段文字被编码为更少的token。由于Transformer的自注意力与许多操作的复杂度依赖于序列长度例如自注意力为 O(n²)，token数下降会直接减少计算与内存开销。同时，在固定的上下文窗口长度下单位token承载更多实际信息，这意味着模型能够在有限窗口内“看到”更多内容——从而在一定程度上缓解因上下文长度受限引起的信息丢失。
 
->注意这依赖于语料的覆盖与质量；若语料偏颇或过度合并罕见词，反而可能损害少数语言或专业术语的表示能力。
+>注意上述情况这依赖于语料的覆盖与质量；若语料偏颇或过度合并罕见词，反而可能损害少数语言或专业术语的表示能力。
 
+### 3分析DeepSeek的分词器
+DeepSeek模型尤其是Coder系列，对代码和中英文都进行了高度优化，我们将加载`DeepSeek Coder`模型的官方分词器。
+#### 准备工作 加载DeepSeek Tokenizer
+请确保transformers库已安装
+```
+# 安装transformers库
+pip install transformers torch
+```
+我们将加载`deepseek-ai/deepseek-6.7b-instruct`的分词器。
+```python
+from transformers import AutoTokenizer
+# 使用DeepSeek Coder系列模型的分词器 (对NLP处理有专门优化)
+MODEL_NAME = "deepseek-ai/deepseek-6.7b-instruct"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+print(f"成功加载模型: {MODEL_NAME} 的分词器。")
+print(f"分词器词表大小 V: {len(tokenizer.get_vocab())}")
+```
+#### 实例分析 DeepSeek分词器的处理逻辑
+DeepSeek的分词器基于BPE在处理中、英文和代码时具有其独特的策略。
 
+案例 1: 中文文本处理
+观察DeepSeek如何处理中文短语，通常它也会使用子词或单个汉字Token来提高效率。
+```python
+chinese_text = "注意力机制是AI的核心技术。🚀🚀"
+# 编码
+encoded_ids = tokenizer.encode(chinese_text, add_special_tokens=False)
+# 解码回Token字符串 (用于观察子词)
+tokens = tokenizer.convert_ids_to_tokens(encoded_ids)
+print(f"\n原文: {chinese_text}")
+print(f"编码: {tokens}")
+print(f"IDs:{encoded_ids}")
+```
+
+最后得到的token可能在显示上与原文有所差异这并不是编码本身出错，而是因为LLM所用的词表在训练过程中对某些字符或子词的覆盖不足（例如BPE训练不够充分），导致模型无法生成对应的token，从而在可读形式上看起来像“乱码”。通过增加训练语料量或进行充分的BPE训练，可以学习到更完整的token映射表，从而解决这个问题，使中文、英文、emoji等字符都能被正确编码和解码。
+
+```python
+import regex
+from collections import Counter
+# DeepSeek风格
+# 匹配多语言字符、数字、标点、空格
+DEEPSEEK_REGEX = r"\p{L}+|\p{N}+|[^\p{L}\p{N}\s]+|\s+"
+
+def split_graphemes(token):
+    return tuple(regex.findall(r'\X', token))
+
+# BPE训练
+def train_bpe(texts, num_merges=50):
+    # 构建初始vocab
+    vocab = Counter()
+    for text in texts:
+        tokens = regex.findall(DEEPSEEK_REGEX, text)
+        for token in tokens:
+            chars = split_graphemes(token) + ('</w>',)
+            vocab[chars] += 1
+
+    merges = []
+    for _ in range(num_merges):
+        pairs = Counter()
+        for word, freq in vocab.items():
+            for i in range(len(word)-1):
+                pairs[(word[i], word[i+1])] += freq
+
+        if not pairs:
+            break
+        best_pair = max(pairs, key=pairs.get)
+        merges.append(best_pair)
+
+        new_vocab = {}
+        for word, freq in vocab.items():
+            w = []
+            i = 0
+            while i < len(word):
+                if i < len(word)-1 and (word[i], word[i+1]) == best_pair:
+                    w.append(word[i]+word[i+1])
+                    i += 2
+                else:
+                    w.append(word[i])
+                    i += 1
+            new_vocab[tuple(w)] = freq
+        vocab = new_vocab
+    return merges, vocab
+class BPETokenizer:
+    def __init__(self, merges):
+        self.merges = merges
+
+    def encode_word(self, token):
+        word = list(split_graphemes(token)) + ['</w>']
+        for pair in self.merges:
+            i = 0
+            new_word = []
+            while i < len(word):
+                if i < len(word)-1 and (word[i], word[i+1]) == pair:
+                    new_word.append(word[i]+word[i+1])
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            word = new_word
+        return word
+
+    def encode(self, text):
+        tokens = regex.findall(DEEPSEEK_REGEX, text)
+        bpe_tokens = []
+        for t in tokens:
+            bpe_tokens.extend(self.encode_word(t))
+        return bpe_tokens
+
+    def decode(self, tokens):
+        return ''.join(tokens).replace('</w>', '')
+
+# 测试
+if __name__ == "__main__":
+    # 中文+英文混合语料
+    train_texts = [
+        "Transformer是AI的核心技术。",
+        "DeepSeek分词器支持中文、英文、emoji等多语言。",
+        "Hello, 世界! 🌍🚀"
+    ]
+
+    # 训练BPE
+    merges, vocab = train_bpe(train_texts, num_merges=50)
+    tokenizer = BPETokenizer(merges)
+
+    test_text = "注意力机制是AI的核心技术。🚀🚀"
+    encoded = tokenizer.encode(test_text)
+    decoded = tokenizer.decode(encoded)
+
+    print("原文:", test_text)
+    print("编码token:", encoded)
+    print("解码:", decoded)
+    print("恢复正确:", decoded == test_text)
+
+```
+
+案例2 Python代码片段处理 (DeepSeek Coder重点)
+
+DeepSeek Coder模型的关键在于其对代码的高效编码，分词器需要保证运算符和关键字不被随意拆开。
+```python
+code_snippet = "def calculate_sum(a, b):\n    return a + b"
+
+# 编码
+encoded_ids = tokenizer.encode(code_snippet, add_special_tokens=False)
+# 解码回Token字符串
+tokens = tokenizer.convert_ids_to_tokens(encoded_ids)
+
+print(f"代码片段:\n{code_snippet}")
+print(f"编码: {tokens}")
+
+```
