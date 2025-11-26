@@ -73,12 +73,124 @@
 
 #### 第二步 初始化基础单元
 
-1. 预分词的主要任务是把原始文本切分成可统计、可合并的最小基础单元（例如字符、字节或预定义字片段），常见策略包括基于空格和标点的切分、Unicode 类别划分或直接采用字节级（byte-level）分割。
-2. 对西文和大多数以空格为词边界的语言，可先用正则表达式按单词边界和标点进行初步切割，而对中文、日文等不以空格为词界的语言则通常采用逐字符或基于字的初始单元来保证覆盖性。
-3. 为了提高可逆性与对未知字符的鲁棒性，很多现代分词器采用 byte-level 方案或对字符先进行 Unicode 正规化（NFKC/NFC），以避免因大小写、组合字符或变体所引起的不一致性。
-4. 预分词时应当明确是否做小写化（lowercasing）或保留大小写信息，二者会影响词表大小、上下文信息与下游模型的语言理解细粒度；如果保留大小写则需要将大小写相关变体视为不同基础单元。
-5. 在预分词阶段同时可以标注并保留一些常见实体或标记（例如表情符号、URL、数字序列和特殊符号）以便训练时能优先学习到这些高频模式的合并行为。
-6. 预分词生成的基础单元序列将作为后续统计合并的输入，务必保存该序列与对应位置信息以便在训练过程反复高效更新。
+1. 预分词的主要任务是把原始文本切分成可统计、可合并的最小基础单元例如字符、字节或预定义字片段。常见策略包括基于空格和标点的切分、Unicode类别划分或直接采用字节级分割。
+   
+   - 基于空格和标点的切分策略：一个完整的句子中遇到空格或者标点（.,!?[]{}...）可以分为独立的tokens，该方法适用于大多数预分词处理过程。
+     
+   ```python
+   # 基于空格和标点切分的实现示例
+   import re
+   
+   def part(text):
+       # 将标点符号单独拆开，并按照空格进行分割
+       text = re.sub(r'([.,!?;:()"\'\[\]{}])', r' \1 ', text)
+       tokens = text.split()
+       return tokens
+   
+   # 测试
+   s = "I like DataWhale."
+   print(part(s))
+
+   ```
+
+   输入
+   >I like DataWhale.
+   
+   输出token划分
+   >['I', 'like', 'DataWhale', '.']
+
+   - Unicode类别划分策略：根据字符类型比如字母、数字、标点、中文、特殊字符等自动切分token，不同Unicode类别会属于不同token块，这种方法天然适用于多种语言混合的文本，提供了可靠的基线切分。
+     
+     ```python
+      import unicodedata
+      
+      def unicode_category_type(ch):
+          """根据 Unicode 类别将字符划为：中文、字母、数字、其他"""
+          if '\u4e00' <= ch <= '\u9fff':
+              return "CJK"
+          if ch.isdigit():
+              return "DIGIT"
+          if ch.isalpha():
+              return "ALPHA"
+          return "OTHER"
+      
+      
+      def tokenize_unicode_category(text):
+          if not text:
+              return []
+      
+          tokens = []
+          current = text[0]
+          current_type = unicode_category_type(current)
+      
+          for ch in text[1:]:
+              ch_type = unicode_category_type(ch)
+              if ch_type == current_type and ch_type != "OTHER":
+                  # 同类字符，继续合并
+                  current += ch
+              else:
+                  # 不同类 → 切分
+                  tokens.append(current)
+                  current = ch
+                  current_type = ch_type
+          tokens.append(current)
+      
+          # 最后再把 "OTHER" 类型（标点等）拆开
+          final_tokens = []
+          for t in tokens:
+              if unicode_category_type(t[0]) == "OTHER":
+                  final_tokens.extend(list(t))
+              else:
+                  final_tokens.append(t)
+          return final_tokens
+      
+      # 测试
+      s = "DataWhale成立于2018年12月6日！至今已有7年的历史了~"
+      print(tokenize_unicode_category(s))
+
+     ```
+     
+     输入
+     >DataWhale成立于2018年12月6日！至今已有7年的历史了~
+
+     输出token划分
+     >['DataWhale', '成立于', '2018', '年', '12', '月', '6', '日', '！', '至今已有', '7', '年的历史了', '~']
+
+   - 字节级切分策略：先将每个字符拆成[UTF-8字节序列](https://datatracker.ietf.org/doc/html/rfc3629)，不依赖语言种类、字符，按照单个字节序列得到一个独立的token。
+
+     ```python
+     
+      def tokenize_byte_level(text):
+          tokens = []
+          for ch in text:
+              # 字符对应的UTF-8字节序列
+              utf8_bytes = ch.encode("utf-8")
+              hex_bytes = [f"{b:02X}" for b in utf8_bytes]
+      
+              # 打印转换过程
+              print(f"{ch} 转化为 UTF-8 字节序列：{hex_bytes}")
+      
+              # 加入 token 列表
+              tokens.extend(hex_bytes)
+          return tokens
+      
+      # 测试
+      s = "All for learners！"
+      print(tokenize_byte_level(s))
+
+     ```
+
+     输入
+     >All for learners！
+
+     输出token划分
+     >['41', '6C', '6C', '20', '66', '6F', '72', '20', '6C', '65', '61', '72', '6E', '65', '72', '73', 'EF', 'BC', '81']
+     
+3. 对大多数以空格为词边界的语言，可先用正则表达式按单词边界和标点进行初步切割，而对中文、日文等不以空格为词界的语言则通常采用逐字符或基于字的初始单元来保证覆盖性。
+4. 为了提高可逆性与对未知字符的鲁棒性，很多现代分词器采用字节级方案或对字符先进行Unicode正规（NFKC、NFC），以避免因大小写、组合字符或变体所引起的不一致性。
+5. 预分词时应当明确是否做小写化或保留大小写信息，二者会影响词表大小、上下文信息与下游模型的语言理解细粒度；如果保留大小写则需要将大小写相关变体视为不同基础单元。
+6. 在预分词阶段同时可以标注并保留一些常见实体或标记例如表情符号、URL、数字序列和特殊符号等以便训练时能优先学习到这些高频模式的合并行为。
+7. 预分词生成的基础单元序列将作为后续统计合并的输入，务必保存该序列与对应位置信息以便在训练过程反复高效更新。
 
 #### 第三步 统计并迭代合并 ——> 核心步骤
 
