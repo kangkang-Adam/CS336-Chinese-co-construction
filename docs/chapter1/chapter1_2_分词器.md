@@ -270,36 +270,63 @@
 
    实现示例：
    ```python
-   # 简易字符分词器实现
-   text = "Hello，World!"
+      # 字符Tokenizer
+   class CharacterTokenizer:
+       def __init__(self):
+           pass  # 不需要额外参数，直接用ord、chr
    
-   # 1.构建词表(去重并排序)
-   vocab = sorted(list(set(text)))
-   print(f"词表: {vocab}") 
+       def encode(self, text):
+           """
+           将字符串编码为字符索引列表（Unicode code points）
+           """
+           return [ord(ch) for ch in text]
    
-   # 2.创建映射 (字符->ID)
-   char_to_id = {char: i for i, char in enumerate(vocab)}
-   id_to_char = {i: char for i, char in enumerate(vocab)}
+       def decode(self, indices):
+           """
+           将索引列表解码为字符串
+           """
+           return ''.join([chr(i) for i in indices])
    
-   # 3.编码(Encode)
-   encoded = [char_to_id[c] for c in text]
-   print(f"原文: '{text}' -> 编码后: {encoded}")
+   # 测试代码
+   if __name__ == "__main__":
+       tokenizer = CharacterTokenizer()
+       string = "hi，很好的，terrific！🐋"  # 测试字符串
    
-   # 4.解码(Decode)
-   decoded = "".join([id_to_char[i] for i in encoded])
-   print(f"解码后: '{decoded}'")
+       # 编码
+       indices = tokenizer.encode(string)
+       print("编码ID:", indices)
+   
+       # 解码
+       reconstructed_string = tokenizer.decode(indices)
+       print("解码:", reconstructed_string)
+   
+       # 验证是否可逆
+       assert string == reconstructed_string, "字符编码、解码不一致!"
+   
+       # 计算词汇量（最大Unicode code point+1）
+       vocabulary_size = max(indices) + 1
+       print("词汇量（上限）", vocabulary_size)
+   
+       # 简单压缩率计算
+       def get_compression_ratio(text, indices):
+           # 压缩率 = 原字符串字节数/编码索引字节数
+           import sys
+           original_bytes = len(text.encode('utf-8'))
+           encoded_bytes = len(indices) * 4  # 假设每个Unicode code point用4字节存储
+           return original_bytes / encoded_bytes
+   
+       compression_ratio = get_compression_ratio(string, indices)
+       print("压缩比率:", compression_ratio)
    ```
 
    
 输入
-> Hello，World!
+> hi，很好的，terrific！🐋
 
 输出
-> 词表: ['!', 'H', 'W', 'd', 'e', 'l', 'o', 'r', '，']
+> 编码ID: [104, 105, 65292, 24456, 22909, 30340, 65292, 116, 101, 114, 114, 105, 102, 105, 99, 65281, 128011]
 > 
-> 原文: 'Hello，World!' -> 编码后: [1, 4, 5, 5, 6, 8, 2, 6, 7, 5, 3, 0]
-> 
-> 解码后: 'Hello，World!'
+> 压缩比率: 0.47058823529411764
 
 
 #### 2.2 字节分词器
@@ -377,7 +404,7 @@
 
 - 输入文本中单个字符首先被编码为UTF-8字节序列；
 - 字节级分词器将每一个UTF-8字节（0~255）直接作为一个token；
-- 因此`token数量 = UTF-8字节数`。
+- 因此`token数量=UTF-8字节数`。
 
 所以
 
@@ -388,7 +415,7 @@ compression_{ratio}
 = 1
 $$
 
-也就是说，字节级分词器完全不具备压缩能力：每个字节对应一个token，不会产生更长或更短的词片段。
+**也就是说，字节级分词器完全不具备压缩能力即每个字节对应一个token，不会产生更长或更短的词片段。**
 
 #### 2.3 词级分词器
 
@@ -634,7 +661,7 @@ $$
 
 在BPE编码阶段，如果没有`</w>`算法可能把`the`错误地拆成'th'、'e'或在后续合并时与其他token错误合并。加上`</w>`后，`the`会被表示为['t', 'h', 'e', '</w>']，BPE就知道这是一个完整单词的结尾不会跨单词错误合并，那么解码阶段去掉`</w>`就能把token拼回`the`，保证原文恢复正确。
 
->所以`</w>`的核心作用是保证单词完整性，并让编码可逆。
+**因此，`</w>`的核心作用是保证单词完整性，并让编码可逆即可以从相应的数字序列转化为原文。**
 #### 四种分词器对比表
 
 | 分词器类型 | 粒度 | 词表大小 | 未登录词 (OOV) | 序列长度 | 代表模型 |
@@ -642,4 +669,6 @@ $$
 | **字符级** | 细 | 小 (100-5k) | 无 | 非常长 | Char-RNN |
 | **词级** | 粗 | 极大 (>100k) | 严重 | 短 | Word2Vec, GloVe |
 | **BPE** | **中 (自适应)** | **适中 (30k-100k)** | **极少** | **适中** | **GPT-4, Llama 3** |
+
+
 
