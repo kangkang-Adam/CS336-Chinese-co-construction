@@ -821,12 +821,12 @@ def pretokenize(text:str):
 def bytes2tokens(b:bytes):
     """
     将UTF-8字节序列转为latin1可表示的token列表。
-    每个字节0–255都能被latin1 接映射到字符。
+    每个字节0–255都能被latin1接映射到字符。
     """
     return [bytes([x]).decode('latin1') for x in b]
 
 def tokens2bytes(tokens):
-    """将 latin1 token 列表重新转回原始 bytes"""
+    """将 latin1 token 列表重新转回原始bytes"""
     return b''.join([t.encode('latin1') for t in tokens])
 
 
@@ -834,7 +834,7 @@ def tokens2bytes(tokens):
 def build_corpus(texts):
     """
     构建byte-level语料。
-    步骤：预分词 → UTF-8 编码 → 分解为单字节 → 作为初始 token 序列。
+    步骤：预分词 → UTF-8编码 → 分解为单字节 → 作为初始token序列。
     """
     corpus = []
     for text in texts:
@@ -931,7 +931,7 @@ class DeepSeekV3Tokenizer:
         对一个预分词做BPE编码：
         - 转字节token
         - 逐步应用merges
-        - 处理OOV：未知token拆回字节或标记为 <unk>
+        - 处理OOV：未知token拆回字节或标记为<unk>
         """
         tokens = bytes2tokens(chunk.encode('utf-8'))
 
@@ -1083,6 +1083,9 @@ if __name__ == "__main__":
 >tokens映射id，以及每个划分token对应的编码，并且对于不同位置的空格和emoji🚀对应的编码以及映射ID是相同的。
 
 从以上代码的运行结果可以看出，分词器的token ↔ id映射仅表示token的内容，而不包含该token在句子中的相对位置。BPE或其他基于频率的合并策略是统计驱动的——它们根据token对或子串在语料中的共现频率决定合并，将常见的字节或子串压缩成更长的token。这说明分词器本身并不理解句子的抽象语义，它更像一个执行统计的模块，通过数学或概率规律重排和压缩字符序列，为上层模型*如LLM*提供可学习的离散输入单元。语义理解依赖下游模型在上下文中学习得到，并结合位置编码信息，而非由分词器直接“理解”。
+
+>为什么DeepSeek要用latin1编解码?
+>在DeepSeek的分词流程中最终处理得到的是数字化的token，但在BPE分词器训练阶段需要按“字符”操作。如果直接用 UTF-8编解码，汉字或emoji等多字节字符在拆分为单字节时会出现不完整序列，Python会报错或替换，导致信息丢失。而latin-1是单字节编码，它把每个字节（0–255）机械映射为一个Unicode字符，保证任意字节序列都能完整、可逆地保存，从而让BPE或其他子词算法能把字节当作字符合并而不丢数据。简单来说使用latin-1是为了在分词器中安全地把原始字节当作字符处理，确保编码器阶段信息完整。
 
 ## 4思考
 1）有研究表明，视觉特征能够增强LLM的理解能力，但并非适用于所有语言任务。那么是否可以在视觉表征与离散 token 之间寻求一种动态“平衡点”：同时为模型提供两类表征方式，并借鉴MoE的思想设计轻量级动态路由，使模型能够在不同任务或文本片段中自动选择或融合最合适的*词——数字*映射表形式，从而显著提升跨场景的适配能力？
