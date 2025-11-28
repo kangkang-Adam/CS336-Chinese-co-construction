@@ -1,4 +1,4 @@
-## 一、快速回顾标准的Transformer架构
+## 一、快速回顾标准的Transformer架构(如果熟悉transformer架构可以跳到标题二开始)
 
 transformer模型的起源可以追溯到2017年，当时由Google研究团队在论文[《Attention Is All You Need》](https://arxiv.org/abs/1706.03762)中首次提出。该模型的核心创新是引入了**自注意力机制**（Self-Attention Mechanism），摒弃了传统的循环神经网络（RNN）和卷积神经网络（CNN）结构。自注意力机制允许模型在处理序列数据时并行计算，从而大幅提高了计算效率，并解决了长距离依赖问题。
 
