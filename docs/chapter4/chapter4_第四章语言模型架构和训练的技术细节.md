@@ -204,9 +204,9 @@ $$
 
 1. **计算均值**（对同一层的所有神经元）：
 
-   $$
-   \mu = \frac{1}{d} \sum_{i=1}^{d} v_i
-   $$
+$$
+\mu = \frac{1}{d} \sum_{i=1}^{d} v_i
+$$
 
 2. **计算标准差**：
 
@@ -255,7 +255,7 @@ $$
 在原始Transformer论文中，层归一化（Layer Normalization） 和残差连接（Residual Connection） 是协同工作的核心设计，共同确保深层网络稳定训练。
 原始论文中是先残差链接在进行归一化：
 
-$$ X = LayerNorm( X + Sublayer(x) ) $$ 
+$$X = LayerNorm( X + Sublayer(x) ) $$ 
 
 $Sublayer(x)$ 是注意力之前的子层输出:
 
