@@ -207,7 +207,7 @@
 
 <div align="center">
 <img width="1236" height="612" alt="da455deb32b22e4285d51b04dfb9a063" src="https://github.com/user-attachments/assets/97e514fd-5def-405d-95c2-9a9208d6f067" />
-   <p>图3 token序列长度对注意力机制的影响</p>
+   <p>图2.3 token序列长度对注意力机制的影响</p>
  </div>
  
 在LLM的token划分中，常见策略包括基于规则的预分词按空格以及标点切分、按Unicode类别的分段如连续汉字、连续拉丁字母或数字...以及更底层的UTF-8字节级切分。前两类方法在处理缺乏显式分隔符或长段同类字符<ins>例如连续的中文长句、拼接的代码标识符或压缩后的字符串时</ins>存在局限，预处理阶段难以有效断句，分词器可能被迫退化为字符级切分，从而把文本映射成更长的token ID序列，增加Transformer的计算和内存负担，其中注意力的复杂度近似为 $O(n^2)$ 。
@@ -1112,7 +1112,7 @@ if __name__ == "__main__":
 
 <div align="center">
    <img width="1788" height="1077" alt="fdfd8c74f27d0832c80a9d4587daeb16" src="https://github.com/user-attachments/assets/7e7b40df-e9c0-43ed-896a-40679a8046c8" />
-   <p>图4 DeepSeek分词器</p>
+   <p>图2.4 DeepSeek分词器</p>
    </div>
    
    这里输入文本信息为*你好 ，hello,  world !  🌏 ！*。
