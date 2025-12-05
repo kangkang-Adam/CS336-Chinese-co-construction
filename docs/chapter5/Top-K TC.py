@@ -108,26 +108,17 @@ class TC_MoE(nn.Module):
         # out本质是各个token在对应Top-K专家的特征空间的语义表征它融合了最适合处理该token的k个专家的知识，比单一FFN能够表达更丰富、更专业的语义信息。
         return out
 
-
-
-    # ----------------------------
     # 路由可视化
-    # ----------------------------
     def visualize(self, tokens, gate_scores, topk_idx, topk_scores):
         # 获取批量大小和专家数量
         B, E = gate_scores.shape
         # 打印可视化标题
         print("\n========== TC MoE路由可视化 ==========\n")
-        # 将张量转换为CPU并脱离计算图
         gate_scores = gate_scores.detach().cpu()
         topk_idx = topk_idx.detach().cpu()
         topk_scores = topk_scores.detach().cpu()
-
-        # 遍历每个token
         for i in range(B):
-            # 显示当前token对应的字符
             print(f"Token {i}: '{tokens[i]}'")
-            # 显示所有专家得分
             print("  全部专家得分：")
             for e in range(E):
                 print(f"    Expert {e:2d}: {gate_scores[i, e]:.4f}")
@@ -137,12 +128,10 @@ class TC_MoE(nn.Module):
                 print(f"    Expert {topk_idx[i, k].item()} score={topk_scores[i, k]:.4f}")
             print("-" * 40)
 
-
-
 # 运行示例（Batch >1）
 if __name__ == "__main__":
     # 定义两个示例句子
-    sentences = ["MoE 是很强大的机制！", "专家混合模型非常高效。"]
+    sentences = ["MoE是很强大的机制！", "专家混合模型非常高效。"]
 
     # byte-tokenize + padding
     # 将每个句子转换为字节列表
@@ -160,8 +149,10 @@ if __name__ == "__main__":
     # token embedding
     # 创建字节嵌入层
     embed = ByteEmbedding(dim=32)
+    
     # 将字节ID转换为嵌入向量 [B, L, D]
     x = embed(byte_ids)
+    
     # 展平为二维张量 [B*L, D]
     x_flat = x.reshape(B * L, -1)
 
@@ -179,7 +170,7 @@ if __name__ == "__main__":
 
     # TC MoE
     # 创建TC MoE层
-    tc_moe = TC_MoE(dim=32, num_experts=15, k=2)
+    tc_moe = TC_MoE(dim=32, num_experts=10, k=2)
     # 前向传播，verbose=True显示路由信息
     out_flat = tc_moe(x_flat, tokens=tokens_flat, verbose=True)
     # 将输出重新整形为三维张量 [B, L, D],第一个B表示处理文本数量即批次大小
