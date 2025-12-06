@@ -258,7 +258,7 @@ MoE研究中有一个值得深思的事实。部分研究表明，在某些场�
    <p>图5.3 哈希路由</p>
  </div>
 
-LSH的代码
+
  
 [LSH](https://proceedings.neurips.cc/paper_files/paper/2024/file/61674667d642ae52f6bb281bea90ee29-Paper-Conference.pdf)为例，采用**固定的、非训练**的哈希函数。每个哈希函数通过将输入Token嵌入 $x \in \mathbb{R}^d$ 投影到由随机向量 $a_i \in \mathbb{R}^d$ 和随机偏置 $b_i$ 定义的平面上，再通过桶宽度 $\epsilon$ （间接控制每个桶的token容量）进行量化，从而将 $x$ 映射到一个索引值为 $i$ 的 $h_i(x)$ 整数哈希桶。
 
@@ -266,9 +266,111 @@ $$
 h_i(x) = \left\lfloor \frac{a_i^\top x + b_i}{\epsilon} \right\rfloor
 $$
 
-这里的 $D$ 是复合哈希函数即随机投影方向的数量。这种方法不通过梯度优化哈希参数，但路由结果会因随训练演化的 $x$ （Token Embedding）而动态改变，LSH **概率性地**实现了负载均衡，并且由于其局部敏感性，能够保留弱局部性——即相似Token更可能落入同一哈希桶。因此，LSH算是一种“弱语义”非学习路由。
+这里的 $D$ 是复合哈希函数即随机投影方向的数量。这种方法不通过梯度优化哈希参数，但路由结果会因随训练演化的 $x$ （Token Embedding）而动态改变，LSH**概率性地**实现了负载均衡，并且由于其局部敏感性，能够保留弱局部性——即相似Token更可能落入同一哈希桶。因此，LSH算是一种“弱语义”非学习路由。
 
 *`桶宽度`是指一个哈希桶所在特征投影平面中占据的物理宽度。*
+
+**基于LSH路由机制的简易MoE实现**：
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Expert FFN
+class Expert(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim*4),
+            nn.ReLU(),
+            nn.Linear(dim*4, dim)
+        )
+    def forward(self, x):
+        return self.ffn(x)
+
+# LSH Router
+class LSHRouter(nn.Module):
+    def __init__(self, d_model, num_experts, n_hashes=8):
+        super().__init__()  # 调用父类 nn.Module 的初始化函数，保证模块可以正常注册参数和buffer
+        self.num_experts = num_experts  # 专家数量，后续路由结果会映射到这些专家上
+        self.n_hashes = n_hashes        # 哈希空间大小，每个token会生成n_hashes个投影值来计算哈希
+
+        # 随机向量矩阵，用于LSH投影
+        # 形状: [n_hashes, d_model]，每一行都是一个随机向量
+        # 用 register_buffer 注册为 buffer 而非参数，不参与梯度更新，但会随model.to(device)转移到对应设备
+        self.register_buffer(
+            "random_vectors", 
+            torch.randn(n_hashes, d_model)  # 从标准正态分布初始化随机向量
+        )
+
+
+    def forward(self, x):
+        # x: [B, D]
+        projections = x @ self.random_vectors.T  # [B, n_hashes]
+        signs = (projections > 0).long()        # 1/0
+        # 二进制映射为整数hash
+        hashes = signs @ (1 << torch.arange(self.n_hashes))  # [B]
+        # 映射到专家ID
+        expert_ids = hashes % self.num_experts
+        return hashes, expert_ids
+
+# LSH-MoE
+class LSH_MoE(nn.Module):
+    def __init__(self, dim, num_experts, n_hashes=8):
+        super().__init__()
+        self.num_experts = num_experts
+        self.router = LSHRouter(dim, num_experts, n_hashes)
+        self.experts = nn.ModuleList([Expert(dim) for _ in range(num_experts)])
+
+    def forward(self, x, verbose=True):
+        """
+        x: [B, D]
+        """
+        B, D = x.shape
+        # 1. LSH路由选择专家
+        hashes, expert_ids = self.router(x)  # [B], [B]
+
+        # 2. 初始化输出
+        out = torch.zeros_like(x)
+
+        # 3. 统计专家负载
+        expert_load = torch.zeros(self.num_experts, dtype=torch.long)
+
+        # 4. 遍历专家计算
+        for e_id, expert in enumerate(self.experts):
+            mask = (expert_ids == e_id).float().unsqueeze(1)  # [B,1]
+            n_tokens = int(mask.sum().item())
+            expert_load[e_id] = n_tokens
+            if n_tokens > 0:
+                expert_out = expert(x * mask)
+                # 输出加权累加
+                out += expert_out * mask
+        if verbose:
+            print("\n========== LSH-MoE Token 哈希映射 ==========")
+            for i in range(B):
+                print(f"Token {i}: Hash={hashes[i].item()} -> Expert {expert_ids[i].item()}")
+            print("\n========== LSH-MoE 专家负载统计 ==========")
+            for e in range(self.num_experts):
+                print(f"Expert {e}: {expert_load[e].item()} tokens")
+            print("------------------------------------------------\n")
+        return out
+
+# 测试
+if __name__ == "__main__":
+    B, D, E = 16, 32, 5  # 16token, 32维，5个专家
+    x = torch.randn(B, D)
+    lsh_moe = LSH_MoE(dim=D, num_experts=E, n_hashes=8)
+    out = lsh_moe(x)
+    print("输出shape:", out.shape)
+
+```
+输入
+>B, D, E = 16, 32, 5
+
+输出
+>LSH-MoE专家负载统计，从0~4号专家处理token数量分别为：[4, 3, 2, 4, 3]
+
+*输出结果会随着embdding层动态变化。*
 
 **MoE路由机制对比**
 
