@@ -420,7 +420,13 @@ if __name__ == "__main__":
 <img width="1200" height="600" alt="c7b2879ba70391b9e340c9c062a232b2" src="https://github.com/user-attachments/assets/33892936-0c5c-4743-8047-6e65d9d85401" />
    <p>图5.6 Switch Transformer</p>
  </div>
- 
+
+ >Switch Transformer子层顺序，采用自注意力层Self-Attention $\rightarrow$ 前馈网络FFN、 MoE层的固定顺序是高效和深度理解的关键。
+>1. **先Self-Attention(建立全局语义)：** Attention层首先通过计算所有token间的依赖关系，将每个**token**转化为**情境化特征**，这保证了模型在处理每个词时，已经充分理解了它在整个句子中的完整语义和依赖关系。
+>2. **后FFN、MoE(专家的特征增强)：** 随后的**FFN或MoE层** 接收这种富含**全局上下文**的特征，对每个token*独立地*进行复杂的非线性增强和深度学习，对于MoE而言，这意味着路由器能根据精准的情境化语义将token路由给最匹配的**专家**进行处理。
+>
+>这种<ins>“先理解全局，后增强个体”</ins>的流程，能够最大化模型的学习效率。如果顺序颠倒让FFN、MoE先行处理缺乏上下文的原始特征，不仅会削弱FFN、MoE的特征增强效果，还可能会因非线性变换**扰乱token间的相似度关系**，进而导致Self-Attention层无法准确计算依赖性，严重降低整个Transformer的学习效率。
+
    - **路由器计算**：路由器对token的表示 $x$ 计算logits，通常对logits做softmax可以得到每个专家的概率分布 $p_i(x)$ 。
    - **实际路由决策**：采用Top-1策略，每个token被分配到得分最高的单个专家执行FFN。softmax 得到的概率主要用于统计、辅助损失，而实际的前向计算只使用被选定的专家即稀疏激活，相较于Top-k，Top-1路由显著简化实现、减少跨设备通信并降低专家同时被调用的计算量，从而提高硬件、通信效率。
    - **超容量处理**：若某专家被指派的token超过其容量，超出部分**不会执行该专家的FFN**即被“丢弃”，这些token仅通过残差传递到下一层；因此超额token不会为该专家产生梯度。
@@ -477,7 +483,6 @@ class ByteTokenizer:
 ```
 这个词汇表的总大小是256+3，由两部分组成：
  1. 基础字节编码：数量256个，它们代表了计算机中所有可能的单字节值从0到255。这种方法能够确保任何文本，不论其语言或编码，都能被无损地编码成一串数字Token ID。
-
  2. 特殊功能编码：数量3个，这些Token专门用于提供文本结构信息，确保模型能够正确处理和理解文本段落的边界和批处理时的对齐，便于计算。
 
 ```python
@@ -515,7 +520,7 @@ batch_encode阶段返回对齐处理张量、未对齐处理的序列长度的�
 - 不规则的张量不能直接输入到为高性能并行计算优化的硬件GPU、TPU中，对齐是进行批处理和利用硬件并行性的必要预处理步骤。这种填充虽然解决了并行计算的问题，但也引入了计算冗余比如这里的[pad]。
 - 原始序列长度信息，则是为了告诉模型末尾填充[pad]从哪里开始的，从而在Attention机制中屏蔽掉它们，防止其将计算资源和注意力分散到这些无关紧要的数据上，确保模型只关注真实的输入信息。
 
-**第二步：构建self-attention**
+**第二步：构建自注意力层**
 ```python
 class SimpleSelfAttention(nn.Module):
     def __init__(self, d_model, nhead):
@@ -567,9 +572,8 @@ class SimpleSelfAttention(nn.Module):
    - n_experts: 专家数量，MoE层中并行运行的FFN模块数量。
    - k: Top-K激活专家数，表示每个token会被路由并由K个专家进行处理。
    - capacity_factor: 每个专家容量系数，用于计算每个专家能接收的最大token数量，缓解负载不均衡问题。
-   - B、T、D、N: 处理批次大小即一次输入的样本句子数量、当前批次中所有句子经过填充操作后的最大长度、模型的特征向量维度即d_model，这是每个token的embedding维度大小、同一批次中所有token的总数量等于 $B \times T$ 。
+   - B、T、D、N: 处理批次大小即一次输入的样本句子数量、当前批次中所有句子经过填充操作后的最大长度或固定长度、模型的特征向量维度即d_model，这是每个token的embedding维度大小、同一批次中所有token的总数量等于 $B \times T$ 。
 
-加入随机扰动用于
 ```python
 class MoELayer(nn.Module):
     def __init__(self, d_model, d_ff, n_experts=4, k=1, capacity_factor=1.25, noisy_gating=True):
@@ -692,11 +696,59 @@ def forward(self, x, mask=None):
    - 作用：在训练过程中，这种噪声会轻微扰动Top-K的选择结果，鼓励路由器为输入token选择不同的专家组合，从而**增强专家的多样性**和**减轻路由器的确定性**，帮助分散负载。
 
 2. 容量限制
-   - 原理：为每个专家设置一个最大容量 $C_expert = \lceil (\frac{N}{E}) \times capacity_{factor} \rceil$ 。如果路由到某个专家的token数量超过 $C_expert$，则*丢弃*超出的token。
+   - 原理：为每个专家设置一个最大容量 $C_{expert} = \lceil (\frac{N}{E}) \times capacity_{factor} \rceil$ 。如果路由到某个专家的token数量超过 $C_{expert}$，则*丢弃*超出的token。
    - 作用：强制所有专家只能处理有限数量的token，从而避免少数专家被过度占用token资源，并确保整个MoE层的计算时间可预测且稳定。但是被丢弃的token缺失了部分输入的语义信息，如果它未经过任何专家处理，这会给模型的收敛速度和最终准确率带来负面影响。
 
+**第四步：构建完整的Transfomer板块**
+支持在传统FFN和MoE之间切换，一个Transformer Block含有两个子层依次为：自注意力层、FNN或MoE，结构图可以参考图Switch Transformer。
+```python
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, nhead, d_ff, use_moe=False, moe_params=None, dropout=0.1):
 
-
+        super().__init__()
+        # 第一子层：多头自注意力机制
+        self.attn = SimpleSelfAttention(d_model, nhead) 
+        
+        # Layer Normalization层：LN1位于注意力层之前
+        self.ln1 = nn.LayerNorm(d_model)
+        # Layer Normalization层：LN2位于FFN、MoE层之前
+        self.ln2 = nn.LayerNorm(d_model) 
+        
+        # Dropout层
+        self.dropout = nn.Dropout(dropout)
+        self.use_moe = use_moe
+        
+        # 第二子层：根据use_moe决定使用FFN还是MoE
+        if use_moe:
+            assert moe_params is not None
+            # 稀疏MoE层 
+            self.moe = MoELayer(**moe_params)
+        else:
+            # 传统的前馈网络 (Feed-Forward Network, FFN)
+            self.ffn = nn.Sequential(
+                nn.Linear(d_model, d_ff), # 扩展维度
+                nn.GELU(),                # 激活函数
+                nn.Linear(d_ff, d_model)  # 还原维度
+            )
+            
+    def forward(self, x, mask=None):
+        # Transformer Block的前向传播
+        # 第一子层：自注意力模块
+        # 1. Layer Norm (LN1) -> 2. Attention -> 3. Dropout -> 4. 残差连接 (+)
+        attn_out = self.attn(self.ln1(x), mask=mask)
+        x = x + self.dropout(attn_out)
+        
+        # 第二子层：FFN、MoE模块
+        if self.use_moe:
+            # MoE路径：Layer Norm -> MoE -> Dropout -> 残差连接
+            moe_out = self.moe(self.ln2(x), mask=mask)
+            x = x + self.dropout(moe_out)
+        else:
+            # FFN路径：Layer Norm -> FFN -> Dropout -> 残差连接 
+            ffn_out = self.ffn(self.ln2(x))
+            x = x + self.dropout(ffn_out)
+        return x
+```
 ## 5.3 DeepSeek创新与实战复现
 ### 5.3.1 DeepSeek的创新关键点
 DeepSeekMoE一种创新的专家混合模型，其目标是实现**极致的专家专业化**，以解决传统MoE模型中存在的**知识混合**和**知识重复**问题，从而在保持计算成本适中的同时，极大地提升模型性能和参数效率。`DeepSeekMoE`的架构主要通过以下两个策略来实现专家专业化：
