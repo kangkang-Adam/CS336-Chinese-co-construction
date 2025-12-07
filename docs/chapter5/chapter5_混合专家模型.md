@@ -560,6 +560,143 @@ class SimpleSelfAttention(nn.Module):
         return self.out(out)
 ```
 
+**第三步：构建MoE层**
+其中简化MoE层:
+   - d_model: 输入输出维度即Transformer层的隐藏层大小。
+   - d_ff: 专家内部隐藏维度，每个专家FFN内部的扩展维度。
+   - n_experts: 专家数量，MoE层中并行运行的FFN模块数量。
+   - k: Top-K激活专家数，表示每个token会被路由并由K个专家进行处理。
+   - capacity_factor: 每个专家容量系数，用于计算每个专家能接收的最大token数量，缓解负载不均衡问题。
+   - B、T、D、N: 处理批次大小即一次输入的样本句子数量、当前批次中所有句子经过填充操作后的最大长度、模型的特征向量维度即d_model，这是每个token的embedding维度大小、同一批次中所有token的总数量等于 $B \times T$ 。
+
+加入随机扰动用于
+```python
+class MoELayer(nn.Module):
+    def __init__(self, d_model, d_ff, n_experts=4, k=1, capacity_factor=1.25, noisy_gating=True):
+        super().__init__()
+        assert k in (1,2) # 确保K激活专家数是1或2
+        self.d_model = d_model
+        self.d_ff = d_ff
+        self.n_experts = n_experts
+        self.k = k
+        self.capacity_factor = capacity_factor
+        self.noisy_gating = noisy_gating
+
+        # 门控网络：负责计算每个token与n_experts个专家的匹配得分（Logits）。
+        self.w_gating = nn.Linear(d_model, n_experts, bias=False)
+        if noisy_gating:
+            # 噪声网络：引入噪声有助于在训练时平均分配token到不同的专家，缓解负载不均衡问题。
+            self.w_noise = nn.Linear(d_model, n_experts, bias=False)
+
+        # 专家网络，每个专家是一个独立的FFN
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.GELU(), # 使用GELU激活函数
+                nn.Linear(d_ff, d_model)
+            ) for _ in range(n_experts)
+        ])
+
+    def _noisy_logits(self, x):
+        """
+            x : 展平后的输入token向量，形状为[N, D] (N=B*T)。
+            Tensor: 带噪声的专家logits，形状为[N, E]。
+        """
+        logits = self.w_gating(x)
+        
+        # 在训练模式且开启noisy_gating时引入随机噪声
+        if self.noisy_gating and self.training:
+            # 使用sigmoid将w_noise的输出映射到[0, 1]，作为噪声的标准差
+            noise_std = torch.sigmoid(self.w_noise(x))
+
+            # 加上正态分布噪声这增强了随机性，有助于训练时的负载均衡
+            logits = logits + torch.randn_like(logits) * noise_std
+        return logits
+
+def forward(self, x, mask=None):
+        B, T, D = x.shape
+        N = B * T
+        x_flat = x.view(N, D)  # [B, T, D] -> [N, D]
+
+        logits = self._noisy_logits(x_flat)
+        scores = F.softmax(logits, dim=-1) # 归一化的专家选择权重，[N, E]
+
+        if self.k == 1:
+            top1 = torch.argmax(scores, dim=-1)  # 每个token选出的Top-1专家索引，[N]
+            # Dispatch Mask：[N, E]，标记每个token选中的Top-1专家，用1表示选中
+            dispatch_mask = F.one_hot(top1, num_classes=self.n_experts).to(x.dtype)
+            # 提取每个token选中的Top-1专家的得分作为最终组合权重，得到[N]
+            combine_weights = torch.gather(scores, 1, top1.unsqueeze(1)).squeeze(1)
+            # 计算规定每个专家最多处理的token数量
+            capacity = int((N/self.n_experts)*self.capacity_factor)+1
+
+            expert_inputs = []
+            expert_indices = []
+            for e in range(self.n_experts):
+                # 找到专家e应该处理的token原始索引值，[N]
+                idx = torch.nonzero(dispatch_mask[:, e], as_tuple=False).squeeze(-1)
+                if idx.numel() > capacity:
+                    # 专家e容量检查，如果超过容量，丢弃多余的token
+                    idx = idx[:capacity]
+                # 保存专家e需要处理的token
+                expert_inputs.append(x_flat[idx])
+                # 记录专家e需要处理token的原始索引值
+                expert_indices.append(idx)
+            # 初始化输出
+            out_flat = torch.zeros_like(x_flat)
+
+            # 遍历每个专家
+            for e in range(self.n_experts):
+                if expert_inputs[e].size(0)==0:
+                    continue   # 专家e没有处理的token
+                # 第e个专家处理token
+                y = self.experts[e](expert_inputs[e])
+                out_flat[expert_indices[e]] = y  # 将专家e的输出放回其在原始序列中的位置
+            out_flat = out_flat * combine_weights.unsqueeze(1)  # 所有专家处理的结果乘以组合权重
+            return out_flat.view(B, T, D)
+        else:
+            # Top-2 简化实现
+            # 每个token选出Top-2专家的得分和索引，[N, 2]
+            topk_vals, topk_idx = torch.topk(scores, k=2, dim=-1)
+            # 计算出每个专家最大处理token数量
+            capacity = int((N/self.n_experts)*self.capacity_factor)+1
+            expert_buckets = [[] for _ in range(self.n_experts)] # 初始化存储空间
+            for i in range(N):
+                for j in range(2):
+                    e = int(topk_idx[i,j].item())      # Top-K专家索引值
+                    w = float(topk_vals[i,j].item())   # 相应的token组合权重
+                    expert_buckets[e].append((i,w)) # 存储：token原始索引、权重
+
+            out_flat = torch.zeros_like(x_flat) # 初始化输出结果
+            for e in range(self.n_experts):
+                bucket = expert_buckets[e]
+                if len(bucket)==0:
+                    continue
+                if len(bucket) > capacity:
+                    bucket = bucket[:capacity]  # 每个专家丢弃超过容量的token
+
+                # token的原始索引值转化为张量：[C] ->（C=容量限制后的数量）
+                idxs = torch.tensor([i for i,_ in bucket], device=x.device, dtype=torch.long)
+                # 对应的组合权重转化为张量：[C]
+                weights = torch.tensor([w for _,w in bucket], device=x.device, dtype=x.dtype)
+                inp = x_flat[idxs]  # 获取专家e需要处理的token，[C, D]
+                y = self.experts[e](inp)
+                # 专家的输出乘以权重后，累加到输出张量上（Top-2叠加），可能有不止一个专家处理同一个token
+                out_flat[idxs] += y * weights.unsqueeze(1)
+            return out_flat.view(B,T,D)
+```
+
+在以上MoE架构中，解决负载不均衡问题，结合以下两种策略：
+1. 噪声门控
+- 原理：在路由器的logits中引入由数据依赖的标准差 $\sigma = \text{Sigmoid}(W_{\text{noise}}x)$ 调节的**正态分布随机噪声**。
+- 作用：在训练过程中，这种噪声会轻微扰动Top-K的选择结果，鼓励路由器为输入token选择不同的专家组合，从而**增强专家的多样性**和**减轻路由器的确定性**，帮助分散负载。
+
+2. 容量限制
+- 原理：为每个专家设置一个最大容量 $C_{\text{expert}} = \lceil (\frac{N}{E}) \times \text{capacity\_factor} \rceil$ 。如果路由到某个专家的token数量超过 $C_{\text{expert}}$，则**丢弃**超出的token。
+- 作用：强制所有专家只能处理有限数量的token，从而避免少数专家被过度占用token资源，并确保整个MoE层的计算时间可预测且稳定。但是被丢弃的token缺失了部分输入的语义信息，如果它未经过任何专家处理，这会给模型的收敛速度和最终准确率带来负面影响。
+
+
+
 ## 5.3 DeepSeek创新与实战复现
 ### 5.3.1 DeepSeek的创新关键点
 DeepSeekMoE一种创新的专家混合模型，其目标是实现**极致的专家专业化**，以解决传统MoE模型中存在的**知识混合**和**知识重复**问题，从而在保持计算成本适中的同时，极大地提升模型性能和参数效率。`DeepSeekMoE`的架构主要通过以下两个策略来实现专家专业化：
